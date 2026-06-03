@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Dict, List, Any
 import json
+import re
 import traceback
 from openai import OpenAI
 import copy
@@ -201,6 +202,87 @@ class RequestBody(BaseModel):
     image: str
     history: List[str]
 
+def sanitize_base64(image_b64: str) -> str:
+    """Strip data-URI prefix and whitespace from base64 (Android Base64.DEFAULT adds newlines)."""
+    if not image_b64:
+        return image_b64
+    if image_b64.startswith("data:") and "," in image_b64:
+        image_b64 = image_b64.split(",", 1)[1]
+    return "".join(image_b64.split())
+
+def parse_model_json(model_output: str):
+    """Parse JSON from model output, tolerating markdown fences and extra text."""
+    if model_output is None:
+        raise ValueError("Empty model output")
+    text = model_output.strip()
+
+    def try_load(candidate: str):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+    parsed = try_load(text)
+    if parsed is not None:
+        return parsed
+
+    for pattern in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            parsed = try_load(match.group(1).strip())
+            if parsed is not None:
+                return parsed
+
+    start_idx = text.find("{")
+    if start_idx != -1:
+        brace_count = 0
+        for i in range(start_idx, len(text)):
+            if text[i] == "{":
+                brace_count += 1
+            elif text[i] == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    parsed = try_load(text[start_idx:i + 1])
+                    if parsed is not None:
+                        return parsed
+                    break
+
+    start_idx = text.find("[")
+    if start_idx != -1:
+        bracket_count = 0
+        for i in range(start_idx, len(text)):
+            if text[i] == "[":
+                bracket_count += 1
+            elif text[i] == "]":
+                bracket_count -= 1
+                if bracket_count == 0:
+                    parsed = try_load(text[start_idx:i + 1])
+                    if parsed is not None:
+                        return parsed
+                    break
+
+    raise ValueError(f"Cannot parse JSON from model output: {text[:300]}")
+
+def extract_bbox(grounder_output_json, width: int, height: int, use_qwen3: bool):
+    if isinstance(grounder_output_json, list):
+        grounder_output_json = grounder_output_json[0]
+
+    bbox = None
+    for key, value in grounder_output_json.items():
+        if key.lower() in ["bbox", "bbox_2d", "bbox-2d", "bbox2d"]:
+            bbox = value
+            break
+    if bbox is None:
+        raise ValueError(f"No bbox field in grounder response: {grounder_output_json}")
+
+    bbox = list(bbox)
+    if use_qwen3:
+        bbox[0] = bbox[0] / 1000 * width
+        bbox[2] = bbox[2] / 1000 * width
+        bbox[1] = bbox[1] / 1000 * height
+        bbox[3] = bbox[3] / 1000 * height
+    return bbox
+
 def get_model_output(model_client, prompt, image_b64=None):
     messages = [
         {
@@ -211,6 +293,7 @@ def get_model_output(model_client, prompt, image_b64=None):
         }
     ]
     if image_b64 is not None:
+        image_b64 = sanitize_base64(image_b64)
         messages[0]["content"].insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}})
 
     start = time.perf_counter()
@@ -277,8 +360,7 @@ async def v1(request_body: RequestBody):
                     planner_prompt = PLANNER_PROMPT.format(task_description=task)
                     planner_output = get_model_output(planner_client, planner_prompt)
                     print(planner_output)
-                    planner_output = planner_output.replace("```json", "").replace("```", "")
-                    planner_output_json = json.loads(planner_output)
+                    planner_output_json = parse_model_json(planner_output)
                     classification = planner_output_json["class"]
                     if classification not in class_default_app:
                         app_name, package_name = None, ""
@@ -320,7 +402,7 @@ async def v1(request_body: RequestBody):
         else:
             history_str = "\n".join(f"{idx}. {act}" for idx, act in enumerate(history, start=1))
 
-        img_b64 = request_body.image
+        img_b64 = sanitize_base64(request_body.image)
         
         pil_img = Image.open(io.BytesIO(base64.b64decode(img_b64)))
         width, height = pil_img.size
@@ -329,7 +411,7 @@ async def v1(request_body: RequestBody):
         decider_prompt = DECIDER_PROMPT.format(task=rewritten_task, history=history_str, task_repeat=rewritten_task)
         decider_output = get_model_output(decider_client, decider_prompt, img_b64)
         print(decider_output)
-        decider_output_json = json.loads(decider_output)
+        decider_output_json = parse_model_json(decider_output)
         reasoning = decider_output_json["reasoning"]
         if should_terminate(reasoning):
             # await 
@@ -346,19 +428,10 @@ async def v1(request_body: RequestBody):
             grounder_prompt = grounder_prompt_fmt.format(reasoning=reasoning, description=parameters["target_element"])
             grounder_output = get_model_output(grounder_client, grounder_prompt, img_b64)
             print(grounder_output)
-            if grounder_output.startswith("```json"):
-                grounder_output = grounder_output.replace("```json", "").replace("```", "")
-            grounder_output_json = json.loads(grounder_output)
-            if isinstance(grounder_output_json, list):
-                grounder_output_json = grounder_output_json[0]
-            bbox = grounder_output_json.get("bbox", grounder_output_json.get("bbox_2d", None))
-            if use_qwen3:
-                bbox[0] = bbox[0] / 1000 * width
-                bbox[2] = bbox[2] / 1000 * width
-                bbox[1] = bbox[1] / 1000 * height
-                bbox[3] = bbox[3] / 1000 * height
-            parameters["x"] = (bbox[0] + bbox[2]) // 2
-            parameters["y"] = (bbox[1] + bbox[3]) // 2
+            grounder_output_json = parse_model_json(grounder_output)
+            bbox = extract_bbox(grounder_output_json, width, height, use_qwen3)
+            parameters["x"] = int((bbox[0] + bbox[2]) // 2)
+            parameters["y"] = int((bbox[1] + bbox[3]) // 2)
         elif action == "done":
             cleanup_task(task)
         response = ResponseBody(
@@ -390,10 +463,11 @@ if __name__ == "__main__":
     parser.add_argument("--planner_url", type=str, help="Base URL for planner model service")
     parser.add_argument("--decider_url", type=str, help="Base URL for decider model service")
     parser.add_argument("--grounder_url", type=str, help="Base URL for grounder model service")
+    parser.add_argument("--api_key", type=str, default="0", help="API key for model services")
     parser.add_argument("--use_qwen3", action='store_true', help="Use Qwen3-VL model format")
     args = parser.parse_args()
     use_qwen3 = args.use_qwen3
-    decider_client = OpenAI(api_key="0", base_url=args.decider_url)
-    grounder_client = OpenAI(api_key="0", base_url=args.grounder_url)
-    planner_client = OpenAI(api_key="0", base_url=args.planner_url)
+    decider_client = OpenAI(api_key=args.api_key, base_url=args.decider_url)
+    grounder_client = OpenAI(api_key=args.api_key, base_url=args.grounder_url)
+    planner_client = OpenAI(api_key=args.api_key, base_url=args.planner_url)
     uvicorn.run(app, host="0.0.0.0", port=args.port)

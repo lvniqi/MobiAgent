@@ -123,7 +123,7 @@ public class ScreenCaptureService extends Service {
         Log.d(TAG, "启动前台服务");
         
         Notification notification = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("MobiAgent")
+            .setContentTitle("PyroAgent")
             .setContentText("屏幕截图服务正在运行")
             .setSmallIcon(R.drawable.baseline_rocket_launch_24)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -446,7 +446,7 @@ public class ScreenCaptureService extends Service {
                     callback.onError("截图等待超时");
                 }
             }
-        }, 10000); // 增加到10秒超时
+        }, 30000); // 30秒超时
     }
 
     // 检查服务是否准备好

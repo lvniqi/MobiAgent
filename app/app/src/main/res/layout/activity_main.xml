@@ -118,7 +118,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="你好！我是 MobiAgent"
+            android:text="你好！我是 PyroAgent"
             android:textColor="@color/text_primary"
             android:textSize="24sp"
             android:textStyle="bold" />
@@ -196,7 +196,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:background="@android:color/transparent"
-                android:hint="向 MobiAgent 发送任务"
+                android:hint="向 PyroAgent 发送任务"
                 android:inputType="textCapSentences|textMultiLine"
                 android:maxHeight="120dp"
                 android:maxLines="5"

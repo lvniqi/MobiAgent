@@ -19,7 +19,7 @@
             android:layout_height="?attr/actionBarSize"
             android:background="@color/background_white"
             app:navigationIcon="@drawable/baseline_clear_all_24"
-            app:title="关于 MobiAgent"
+            app:title="关于 PyroAgent"
             app:titleTextColor="@color/text_primary" />
 
     </com.google.android.material.appbar.AppBarLayout>
@@ -55,8 +55,9 @@
                         android:layout_width="80dp"
                         android:layout_height="80dp"
                         android:layout_marginBottom="16dp"
-                        android:src="@drawable/baseline_rocket_launch_24"
-                        android:tint="@color/white" />
+                        android:scaleType="fitCenter"
+                        android:src="@mipmap/ic_launcher"
+                        android:contentDescription="@string/app_name" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -161,7 +162,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginBottom="8dp"
                         android:lineSpacingExtra="4dp"
-                        android:text="1️⃣ 启用无障碍服务\n在系统设置中开启 MobiAgent 无障碍服务"
+                        android:text="1️⃣ 启用无障碍服务\n在系统设置中开启 PyroAgent 无障碍服务"
                         android:textColor="@color/text_secondary"
                         android:textSize="14sp" />
 

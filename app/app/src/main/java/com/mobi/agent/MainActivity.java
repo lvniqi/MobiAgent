@@ -1,5 +1,5 @@
 /**
- * MobiAgent移动代理主活动类
+ * PyroAgent移动代理主活动类
  * 
  * 功能说明：
  * 1. 提供聊天界面，支持文本输入
@@ -7,7 +7,7 @@
  * 3. 支持复制、分享等功能
  * 4. 使用RecyclerView显示聊天记录
  * 
- * @author MobiAgent-AndroidStudio
+ * @author PyroAgent-AndroidStudio
  * @version 1.0
  */
 package com.mobi.agent;
@@ -119,7 +119,7 @@ public class MainActivity extends AppCompatActivity {
     // ==================== 服务器配置 ====================
     private String serverIp = "123.60.91.241";
     private String serverPort = "2333";
-    public static final String PREFS_NAME = "MobiAgentPrefs";
+    public static final String PREFS_NAME = "PyroAgentPrefs";
     public static final String IP_KEY = "serverIp";
     public static final String PORT_KEY = "serverPort";
 
@@ -170,10 +170,10 @@ public class MainActivity extends AppCompatActivity {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder();
             
-            // 设置超时时间
-            builder.connectTimeout(30, TimeUnit.SECONDS);
-            builder.readTimeout(30, TimeUnit.SECONDS);
-            builder.writeTimeout(30, TimeUnit.SECONDS);
+            // 设置超时时间（LLM 推理可能较慢，读超时需足够长）
+            builder.connectTimeout(60, TimeUnit.SECONDS);
+            builder.readTimeout(120, TimeUnit.SECONDS);
+            builder.writeTimeout(60, TimeUnit.SECONDS);
             
             // 添加拦截器来支持明文通信
             builder.addInterceptor(chain -> {
@@ -1544,9 +1544,9 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
             
-            // 等待截图完成（最多等待10秒）
+            // 等待截图完成（最多等待30秒）
             try {
-                boolean finished = latch.await(10, TimeUnit.SECONDS);
+                boolean finished = latch.await(30, TimeUnit.SECONDS);
                 if (!finished) {
                     Log.e("MainActivity", "截图操作超时");
                     responseBuilder.append("❌ 截图操作超时");
@@ -1929,7 +1929,7 @@ public class MainActivity extends AppCompatActivity {
                 
                 runOnUiThread(() -> {
                     // 添加terminate异常终止消息到聊天界面
-                    addResponse("无障碍权限未启用，请在系统设置中为 MobiAgent 启用无障碍服务", Message.SENT_BY_BOT);
+                    addResponse("无障碍权限未启用，请在系统设置中为 PyroAgent 启用无障碍服务", Message.SENT_BY_BOT);
                     
                     // 弹出异常终止提示
                     showEnhancedCompletionToast("任务异常终止");
@@ -2488,7 +2488,7 @@ public class MainActivity extends AppCompatActivity {
     // ==================== 设置提示文本方法 ====================
     private void setRandomHint() {
         // 设置统一的提示文本
-        messageEditText.setHint("向 MobiAgent 发送任务");
+        messageEditText.setHint("向 PyroAgent 发送任务");
     }
 
 }

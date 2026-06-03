@@ -438,7 +438,7 @@ public class monitoru2 extends AppCompatActivity {
                 synchronized (lockObject) {
                     while (!captureCompleted[0]) {
                         try {
-                            lockObject.wait(10000); // 最多等待10秒
+                            lockObject.wait(30000); // 最多等待30秒
                             if (!captureCompleted[0]) {
                                 throw new Exception("截图操作超时");
                             }

@@ -320,23 +320,35 @@ grounder_model = ""
 
 # 全局偏好提取器
 preference_extractor = None
-def init(service_ip, decider_port, grounder_port, planner_port, api_key="mobiagent-key", enable_user_profile=False, use_graphrag=False):
+def init(service_ip, decider_port, grounder_port, planner_port, api_key="mobiagent-key", enable_user_profile=False, use_graphrag=False, base_url=None, model=""):
     global decider_client, grounder_client, planner_client, general_client, general_model, apps, preference_extractor
+    global planner_model, decider_model, grounder_model
     
     # 加载环境变量
     env_path = Path(__file__).parent / ".env"
     load_dotenv(env_path)
+
+    if base_url:
+        decider_url = grounder_url = planner_url = base_url.rstrip("/")
+    else:
+        decider_url = f"http://{service_ip}:{decider_port}/v1"
+        grounder_url = f"http://{service_ip}:{grounder_port}/v1"
+        planner_url = f"http://{service_ip}:{planner_port}/v1"
+
+    if model:
+        planner_model = decider_model = grounder_model = model
+
     decider_client = OpenAI(
         api_key = api_key,
-        base_url = f"http://{service_ip}:{decider_port}/v1",
+        base_url = decider_url,
     )
     grounder_client = OpenAI(
         api_key = api_key,
-        base_url = f"http://{service_ip}:{grounder_port}/v1",
+        base_url = grounder_url,
     )
     planner_client = OpenAI(
         api_key = api_key,
-        base_url = f"http://{service_ip}:{planner_port}/v1",
+        base_url = planner_url,
     )
     
     # 初始化偏好提取器（可由命令行开关控制）
@@ -1335,6 +1347,8 @@ if __name__ == "__main__":
     parser.add_argument("--grounder_port", type=int, default=8001, help="Port for grounder service (default: 8001)")
     parser.add_argument("--planner_port", type=int, default=8002, help="Port for planner service (default: 8002)")
     parser.add_argument("--api_key", type=str, default="mobiagent-key", help="API key for model services (default: mobiagent-key)")
+    parser.add_argument("--base_url", type=str, default=None, help="OpenAI-compatible base URL (e.g. http://host:8080/inference/xxx/v1). When set, overrides --service_ip and port args for all services.")
+    parser.add_argument("--model", type=str, default="", help="Model name for decider/grounder/planner (required for remote endpoints)")
     parser.add_argument("--user_profile", choices=["on", "off"], default="off", help="Enable user profile memory (default: off)")
     parser.add_argument("--use_graphrag", choices=["on", "off"], default="off", help="Use GraphRAG for user profile preference memory (default: off)")
     parser.add_argument("--clear_memory", action="store_true", help="Force clear all stored user memories and exit")
@@ -1350,7 +1364,8 @@ if __name__ == "__main__":
     enable_user_profile = (args.user_profile == "on")
     use_graphrag = (args.use_graphrag == "on")
     init(args.service_ip, args.decider_port, args.grounder_port, args.planner_port, args.api_key,
-        enable_user_profile=enable_user_profile, use_graphrag=use_graphrag)
+        enable_user_profile=enable_user_profile, use_graphrag=use_graphrag,
+        base_url=args.base_url, model=args.model)
 
     # 如果需要清除记忆，优先执行并退出
     if args.clear_memory:

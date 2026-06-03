@@ -1,9 +1,9 @@
 <resources>
-    <string name="app_name">MobiAgent</string>
-    <string name="accessibility_service_description">MobiAgent 无障碍服务用于自动化操作，包括点击、滑动等功能。启用此服务以允许应用执行自动化任务。</string>
+    <string name="app_name">PyroAgent</string>
+    <string name="accessibility_service_description">PyroAgent 无障碍服务用于自动化操作，包括点击、滑动等功能。启用此服务以允许应用执行自动化任务。</string>
     
     <!-- 主界面 -->
-    <string name="welcome_title">你好！我是 MobiAgent</string>
+    <string name="welcome_title">你好！我是 PyroAgent</string>
     <string name="welcome_subtitle">你的智能手机助手\n告诉我你想做什么，我会帮你完成</string>
     <string name="welcome_hint">💡 首次使用请点击右上角查看详情</string>
     <string name="input_hint">输入你的指令...</string>
