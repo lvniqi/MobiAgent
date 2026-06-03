@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Iterator, Tuple
 import json
 import re
 import traceback
@@ -264,14 +265,25 @@ def parse_model_json(model_output: str):
     raise ValueError(f"Cannot parse JSON from model output: {text[:300]}")
 
 def extract_bbox(grounder_output_json, width: int, height: int, use_qwen3: bool):
-    if isinstance(grounder_output_json, list):
-        grounder_output_json = grounder_output_json[0]
-
     bbox = None
-    for key, value in grounder_output_json.items():
-        if key.lower() in ["bbox", "bbox_2d", "bbox-2d", "bbox2d"]:
-            bbox = value
-            break
+
+    if isinstance(grounder_output_json, list):
+        if len(grounder_output_json) >= 4 and all(
+            isinstance(v, (int, float)) for v in grounder_output_json[:4]
+        ):
+            bbox = grounder_output_json[:4]
+        elif grounder_output_json and isinstance(grounder_output_json[0], dict):
+            grounder_output_json = grounder_output_json[0]
+        else:
+            raise ValueError(f"Unexpected list format in grounder response: {grounder_output_json}")
+
+    if bbox is None:
+        if not isinstance(grounder_output_json, dict):
+            raise ValueError(f"Unexpected grounder response type: {type(grounder_output_json)}")
+        for key, value in grounder_output_json.items():
+            if key.lower() in ["bbox", "bbox_2d", "bbox-2d", "bbox2d"]:
+                bbox = value
+                break
     if bbox is None:
         raise ValueError(f"No bbox field in grounder response: {grounder_output_json}")
 
@@ -283,27 +295,43 @@ def extract_bbox(grounder_output_json, width: int, height: int, use_qwen3: bool)
         bbox[3] = bbox[3] / 1000 * height
     return bbox
 
-def get_model_output(model_client, prompt, image_b64=None):
+def format_sse(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+def build_messages(prompt: str, image_b64: str | None = None):
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-            ],
+            "content": [{"type": "text", "text": prompt}],
         }
     ]
     if image_b64 is not None:
         image_b64 = sanitize_base64(image_b64)
-        messages[0]["content"].insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}})
+        messages[0]["content"].insert(
+            0,
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+        )
+    return messages
 
-    start = time.perf_counter()
-    response = model_client.chat.completions.create(
+def iter_model_stream(model_client, prompt, image_b64=None) -> Iterator[str]:
+    messages = build_messages(prompt, image_b64)
+    stream = model_client.chat.completions.create(
         model="",
         messages=messages,
         temperature=0,
+        stream=True,
     )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            yield delta
+
+def get_model_output(model_client, prompt, image_b64=None):
+    start = time.perf_counter()
+    parts = list(iter_model_stream(model_client, prompt, image_b64))
+    content = "".join(parts)
     print(f"Model response time: {time.perf_counter() - start:.2f} seconds")
-    return response.choices[0].message.content
+    return content
 
 def rewrite_task(original_task: str, app_name):
     ret = original_task
@@ -340,116 +368,160 @@ def cleanup_task(task):
             rewrite_cache.pop(task, None)
             task_refcnt.pop(task, None)
 
-# Define the POST endpoint
-@app.post("/v1", response_model=ResponseBody)
-async def v1(request_body: RequestBody):
-    try:
-        if request_body.task.strip() == "":
-            return ResponseBody(
-                reasoning="任务不能为空，任务终止",
-                action="terminate",
-                parameters={}
-            )
-        history = request_body.history
-        task = request_body.task
-        if len(history) == 0:
-            try:
-                print(f"Task: {task}")
-                app_name, package_name = try_find_app(task)
-                if app_name is None:
-                    planner_prompt = PLANNER_PROMPT.format(task_description=task)
-                    planner_output = get_model_output(planner_client, planner_prompt)
-                    print(planner_output)
-                    planner_output_json = parse_model_json(planner_output)
-                    classification = planner_output_json["class"]
-                    if classification not in class_default_app:
-                        app_name, package_name = None, ""
-                    else:
-                        app_name = class_default_app[classification]
-                        package_name = supported_apps[app_name]
-            except Exception as e:
-                traceback.print_exc()
-                app_name, package_name = None, ""
-            if app_name is None or app_name == "" or package_name == "":
-                reasoning = f"暂不支持用户任务\"{task}\"需要打开的应用，任务终止"
-                return ResponseBody(
-                    reasoning=reasoning,
-                    action="terminate",
-                    parameters={}
-                )
-            else:
-                reasoning = f"为了完成用户任务\"{task}\", 我需要打开应用\"{app_name}\""
-                # async with cache_lock:
-                task_refcnt[task] = task_refcnt.get(task, 0) + 1
-                if task_refcnt[task] == 1:
-                    rewrite_cache[task] = rewrite_task(task, app_name)
-                return ResponseBody(
-                    reasoning=reasoning,
-                    action="open_app",
-                    parameters={
-                        "package_name": package_name,
-                    }
-                )
-                    
-        # async with cache_lock:
-        rewritten_task = rewrite_cache.get(task, task)
-        
-        # print("raw history: ", history)
-        history = validate_history(history)
-        # print("cleaned history: ", history)
-        if len(history) == 0:
-            history_str = "(No history)"
-        else:
-            history_str = "\n".join(f"{idx}. {act}" for idx, act in enumerate(history, start=1))
+def process_v1_events(request_body: RequestBody) -> Iterator[Tuple[str, dict]]:
+    if request_body.task.strip() == "":
+        yield ("result", {
+            "reasoning": "任务不能为空，任务终止",
+            "action": "terminate",
+            "parameters": {},
+        })
+        return
 
-        img_b64 = sanitize_base64(request_body.image)
-        
-        pil_img = Image.open(io.BytesIO(base64.b64decode(img_b64)))
-        width, height = pil_img.size
-        print(f"Received image of size: {width}x{height}")
+    history = request_body.history
+    task = request_body.task
 
-        decider_prompt = DECIDER_PROMPT.format(task=rewritten_task, history=history_str, task_repeat=rewritten_task)
-        decider_output = get_model_output(decider_client, decider_prompt, img_b64)
-        print(decider_output)
-        decider_output_json = parse_model_json(decider_output)
-        reasoning = decider_output_json["reasoning"]
-        if should_terminate(reasoning):
-            # await 
-            cleanup_task(task)
-            return ResponseBody(
-                reasoning=reasoning,
-                action="terminate",
-                parameters={}
-            )
-        action = decider_output_json["action"]
-        parameters = decider_output_json["parameters"]
-        if action == "click":
-            grounder_prompt_fmt = GROUNDER_PROMPT_QWEN3 if use_qwen3 else GROUNDER_PROMPT
-            grounder_prompt = grounder_prompt_fmt.format(reasoning=reasoning, description=parameters["target_element"])
-            grounder_output = get_model_output(grounder_client, grounder_prompt, img_b64)
-            print(grounder_output)
-            grounder_output_json = parse_model_json(grounder_output)
-            bbox = extract_bbox(grounder_output_json, width, height, use_qwen3)
-            parameters["x"] = int((bbox[0] + bbox[2]) // 2)
-            parameters["y"] = int((bbox[1] + bbox[3]) // 2)
-        elif action == "done":
-            cleanup_task(task)
-        response = ResponseBody(
+    if len(history) == 0:
+        try:
+            print(f"Task: {task}")
+            yield ("progress", {"stage": "planner", "message": "正在识别目标应用..."})
+            app_name, package_name = try_find_app(task)
+            if app_name is None:
+                planner_prompt = PLANNER_PROMPT.format(task_description=task)
+                planner_parts = []
+                for delta in iter_model_stream(planner_client, planner_prompt):
+                    planner_parts.append(delta)
+                    yield ("progress", {"stage": "planner", "delta": delta})
+                planner_output = "".join(planner_parts)
+                print(planner_output)
+                planner_output_json = parse_model_json(planner_output)
+                classification = planner_output_json["class"]
+                if classification not in class_default_app:
+                    app_name, package_name = None, ""
+                else:
+                    app_name = class_default_app[classification]
+                    package_name = supported_apps[app_name]
+        except Exception:
+            traceback.print_exc()
+            app_name, package_name = None, ""
+
+        if app_name is None or app_name == "" or package_name == "":
+            yield ("result", {
+                "reasoning": f"暂不支持用户任务\"{task}\"需要打开的应用，任务终止",
+                "action": "terminate",
+                "parameters": {},
+            })
+            return
+
+        reasoning = f"为了完成用户任务\"{task}\", 我需要打开应用\"{app_name}\""
+        task_refcnt[task] = task_refcnt.get(task, 0) + 1
+        if task_refcnt[task] == 1:
+            rewrite_cache[task] = rewrite_task(task, app_name)
+        yield ("result", {
+            "reasoning": reasoning,
+            "action": "open_app",
+            "parameters": {"package_name": package_name},
+        })
+        return
+
+    rewritten_task = rewrite_cache.get(task, task)
+    history = validate_history(history)
+    history_str = "(No history)" if len(history) == 0 else "\n".join(
+        f"{idx}. {act}" for idx, act in enumerate(history, start=1)
+    )
+
+    img_b64 = sanitize_base64(request_body.image)
+    pil_img = Image.open(io.BytesIO(base64.b64decode(img_b64)))
+    width, height = pil_img.size
+    print(f"Received image of size: {width}x{height}")
+
+    decider_prompt = DECIDER_PROMPT.format(
+        task=rewritten_task,
+        history=history_str,
+        task_repeat=rewritten_task,
+    )
+    yield ("progress", {"stage": "decider", "message": "正在分析截图..."})
+    decider_parts = []
+    for delta in iter_model_stream(decider_client, decider_prompt, img_b64):
+        decider_parts.append(delta)
+        yield ("progress", {"stage": "decider", "delta": delta})
+    decider_output = "".join(decider_parts)
+    print(decider_output)
+    decider_output_json = parse_model_json(decider_output)
+    reasoning = decider_output_json["reasoning"]
+    if should_terminate(reasoning):
+        cleanup_task(task)
+        yield ("result", {
+            "reasoning": reasoning,
+            "action": "terminate",
+            "parameters": {},
+        })
+        return
+
+    action = decider_output_json["action"]
+    parameters = decider_output_json["parameters"]
+    if action == "click":
+        grounder_prompt_fmt = GROUNDER_PROMPT_QWEN3 if use_qwen3 else GROUNDER_PROMPT
+        grounder_prompt = grounder_prompt_fmt.format(
             reasoning=reasoning,
-            action=action,
-            parameters=parameters
+            description=parameters["target_element"],
         )
-        return response
+        yield ("progress", {"stage": "grounder", "message": "正在定位元素..."})
+        grounder_parts = []
+        for delta in iter_model_stream(grounder_client, grounder_prompt, img_b64):
+            grounder_parts.append(delta)
+            yield ("progress", {"stage": "grounder", "delta": delta})
+        grounder_output = "".join(grounder_parts)
+        print(grounder_output)
+        grounder_output_json = parse_model_json(grounder_output)
+        bbox = extract_bbox(grounder_output_json, width, height, use_qwen3)
+        parameters["x"] = int((bbox[0] + bbox[2]) // 2)
+        parameters["y"] = int((bbox[1] + bbox[3]) // 2)
+    elif action == "done":
+        cleanup_task(task)
 
+    yield ("result", {
+        "reasoning": reasoning,
+        "action": action,
+        "parameters": parameters,
+    })
+
+def build_v1_response(request_body: RequestBody) -> ResponseBody:
+    for event, data in process_v1_events(request_body):
+        if event == "result":
+            return ResponseBody(**data)
+    raise HTTPException(status_code=500, detail="No result produced")
+
+def sse_response(request_body: RequestBody) -> Iterator[str]:
+    try:
+        for event, data in process_v1_events(request_body):
+            yield format_sse(event, data)
     except Exception as e:
         traceback.print_exc()
-        # await 
         cleanup_task(request_body.task)
-        # Handle potential errors
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred: {str(e)}"
-        )
+        yield format_sse("error", {"detail": str(e)})
+
+@app.post("/v1")
+async def v1(request_body: RequestBody):
+    return StreamingResponse(
+        sse_response(request_body),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@app.post("/v1/sync", response_model=ResponseBody)
+async def v1_sync(request_body: RequestBody):
+    try:
+        return build_v1_response(request_body)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        cleanup_task(request_body.task)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 # Optional: Add a root endpoint for health checks
 @app.get("/")

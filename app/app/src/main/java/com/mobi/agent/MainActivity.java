@@ -96,6 +96,8 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okio.BufferedSource;
 
 /**
  * 主活动类 - AI聊天机器人界面
@@ -170,10 +172,10 @@ public class MainActivity extends AppCompatActivity {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder();
             
-            // 设置超时时间（LLM 推理可能较慢，读超时需足够长）
+            // SSE 流式响应：读超时设为 0（不限制），连接/写入仍保留超时
             builder.connectTimeout(60, TimeUnit.SECONDS);
-            builder.readTimeout(120, TimeUnit.SECONDS);
-            builder.writeTimeout(60, TimeUnit.SECONDS);
+            builder.readTimeout(0, TimeUnit.SECONDS);
+            builder.writeTimeout(120, TimeUnit.SECONDS);
             
             // 添加拦截器来支持明文通信
             builder.addInterceptor(chain -> {
@@ -672,6 +674,7 @@ public class MainActivity extends AppCompatActivity {
                                 .url(url)
                                 .post(body)
                                 .addHeader("Content-Type", "application/json; charset=utf-8")
+                                .addHeader("Accept", "text/event-stream")
                                 .build();
 
                         client.newCall(request).enqueue(new Callback() {
@@ -717,9 +720,11 @@ public class MainActivity extends AppCompatActivity {
                                 String result = null;
                                 
                                 try {
-                                    // 先读取响应体内容（确保在finally中关闭）
+                                    // 解析 SSE 流，提取 result 事件
                                     if (response.body() != null) {
-                                        result = response.body().string();
+                                        try (ResponseBody responseBody = response.body()) {
+                                            result = parseSseResult(responseBody.source());
+                                        }
                                     } else {
                                         result = "";
                                     }
@@ -2094,6 +2099,71 @@ public class MainActivity extends AppCompatActivity {
         }
         
         Log.d("MainActivity", "MainActivity资源清理完成");
+    }
+
+    /**
+     * 解析 SSE (text/event-stream) 响应，返回 result 事件的 JSON 字符串
+     */
+    private String parseSseResult(BufferedSource source) throws IOException {
+        String eventType = "message";
+        StringBuilder dataBuffer = new StringBuilder();
+        String resultJson = null;
+        String errorMessage = null;
+
+        while (!source.exhausted()) {
+            String line = source.readUtf8Line();
+            if (line == null) {
+                break;
+            }
+            if (line.startsWith("event:")) {
+                eventType = line.substring(6).trim();
+            } else if (line.startsWith("data:")) {
+                if (dataBuffer.length() > 0) {
+                    dataBuffer.append("\n");
+                }
+                dataBuffer.append(line.substring(5).trim());
+            } else if (line.isEmpty()) {
+                if (dataBuffer.length() > 0) {
+                    String data = dataBuffer.toString();
+                    if ("result".equals(eventType)) {
+                        resultJson = data;
+                    } else if ("error".equals(eventType)) {
+                        try {
+                            JSONObject err = new JSONObject(data);
+                            errorMessage = err.optString("detail", data);
+                        } catch (JSONException e) {
+                            errorMessage = data;
+                        }
+                    } else if ("progress".equals(eventType)) {
+                        Log.d("MainActivity", "SSE progress: " + data);
+                    }
+                    dataBuffer.setLength(0);
+                    eventType = "message";
+                }
+            }
+        }
+
+        if (dataBuffer.length() > 0) {
+            String data = dataBuffer.toString();
+            if ("result".equals(eventType)) {
+                resultJson = data;
+            } else if ("error".equals(eventType)) {
+                try {
+                    JSONObject err = new JSONObject(data);
+                    errorMessage = err.optString("detail", data);
+                } catch (JSONException e) {
+                    errorMessage = data;
+                }
+            }
+        }
+
+        if (errorMessage != null) {
+            throw new IOException(errorMessage);
+        }
+        if (resultJson == null || resultJson.trim().isEmpty()) {
+            throw new IOException("SSE 响应中未找到 result 事件");
+        }
+        return resultJson;
     }
 
     /**
